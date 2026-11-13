@@ -71,6 +71,30 @@ fn apply_worker_env(
     command.env_remove("RLM_DEPTH");
 }
 
+/// The session worker's program and role argument. On Linux, a binary
+/// replaced or removed while the daemon runs (a package upgrade) leaves
+/// `current_exe()` naming `<path> (deleted)`, which no longer exists: the
+/// worker then re-executes this running image through `/proc/self/exe`, so it
+/// stays on the supervisor's build. argv[0] keeps the installed path, because
+/// the boot reap recognizes workers by it (`boot_reap::is_worker_argv`).
+fn worker_command(current_exe: &std::path::Path) -> Command {
+    #[cfg(target_os = "linux")]
+    let mut command = if current_exe.exists() {
+        Command::new(current_exe)
+    } else {
+        use std::os::unix::ffi::OsStrExt;
+        let path = current_exe.as_os_str().as_bytes();
+        let installed = path.strip_suffix(b" (deleted)").unwrap_or(path);
+        let mut command = Command::new("/proc/self/exe");
+        command.arg0(std::ffi::OsStr::from_bytes(installed));
+        command
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut command = Command::new(current_exe);
+    command.arg("worker");
+    command
+}
+
 impl SpawnedWorker {
     pub(crate) fn id(&self) -> Option<u32> {
         self.child.id()
@@ -595,7 +619,7 @@ impl Supervisor {
             )
         };
 
-        let executable = std::env::current_exe().context("resolve pa-daemon executable")?;
+        let current_exe = std::env::current_exe().context("resolve pa-daemon executable")?;
         let stderr_log_path =
             crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id);
         let stderr_log = crate::worker_stderr::open_for_spawn(&stderr_log_path)?;
@@ -605,8 +629,7 @@ impl Supervisor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let mut command = Command::new(&executable);
-        command.arg("worker");
+        let mut command = worker_command(&current_exe);
         apply_worker_env(&mut command, client_launch_env.as_ref(), launch_env);
         command
             .stdin(std::process::Stdio::null())
@@ -1120,5 +1143,66 @@ mod tests {
             Some(&Some(std::ffi::OsStr::new("1"))),
             "the internal identity still rides"
         );
+    }
+
+    /// The helper's role when this test binary is re-executed (unset: skip).
+    #[cfg(target_os = "linux")]
+    const UNLINKED_ROLE_ENV: &str = "PA_TEST_UNLINKED_WORKER_ROLE";
+    #[cfg(target_os = "linux")]
+    const UNLINKED_HELPER: &str = "supervisor::supervision::tests::unlinked_binary_helper";
+
+    /// A package upgrade replaces the daemon binary while the daemon runs: the
+    /// worker spawn must still start, as a process the boot reap recognizes.
+    /// The helper runs from a copy named `prime-agent` and unlinks it first.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_daemon_binary_still_spawns_a_recognizable_worker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let copy = dir.path().join("prime-agent");
+        std::fs::copy(std::env::current_exe().expect("test binary"), &copy).expect("copy");
+        let output = std::process::Command::new(&copy)
+            .args([UNLINKED_HELPER, "--exact", "--ignored", "--nocapture"])
+            .env(UNLINKED_ROLE_ENV, "spawn")
+            .output()
+            .expect("run the helper");
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed by a_replaced_daemon_binary_still_spawns_a_recognizable_worker"]
+    async fn unlinked_binary_helper() {
+        match std::env::var(UNLINKED_ROLE_ENV).as_deref() {
+            Ok("spawn") => {
+                std::fs::remove_file(std::env::current_exe().expect("own binary"))
+                    .expect("unlink own binary");
+                let current_exe = std::env::current_exe().expect("unlinked binary");
+                // `worker` is a libtest filter that matches nothing; the
+                // helper filter runs the probe role in the worker process.
+                let output = worker_command(&current_exe)
+                    .args([UNLINKED_HELPER, "--exact", "--ignored", "--nocapture"])
+                    .env(UNLINKED_ROLE_ENV, "probe")
+                    .output()
+                    .await
+                    .expect("spawn the worker from the unlinked binary");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let argv: Vec<String> = stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("worker argv: "))
+                    .map(|argv| serde_json::from_str(argv).expect("argv json"))
+                    .expect("the worker reports its argv");
+                assert!(crate::boot_reap::is_worker_argv(&argv), "{argv:?}");
+            }
+            Ok("probe") => {
+                let argv: Vec<String> = std::env::args().collect();
+                println!("worker argv: {}", serde_json::to_string(&argv).unwrap());
+            }
+            _ => {}
+        }
     }
 }

@@ -78,7 +78,15 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
         return HolderFlavor::AnotherProcess;
     };
     if let Some(own) = own_exe {
-        if exe == own {
+        // A holder still running this install's replaced image reads
+        // `<own path> (deleted)` on Linux (and this process does too once its
+        // own binary is replaced): the same install either way.
+        let live_path = |path: &Path| {
+            path.to_string_lossy()
+                .trim_end_matches(" (deleted)")
+                .to_string()
+        };
+        if live_path(exe) == live_path(own) {
             return HolderFlavor::ThisBuild;
         }
     }
@@ -594,6 +602,15 @@ Session: ts01ab";
     fn the_holder_classification_matrix() {
         let own = Path::new("/Users/k/.local/share/prime-agent/prime-agent");
         assert_eq!(classify_from(Some(own), Some(own)), HolderFlavor::ThisBuild);
+        // An install outside the known layouts, replaced while its daemon
+        // runs: the holder's image reads `<own path> (deleted)`.
+        assert_eq!(
+            classify_from(
+                Some(Path::new("/usr/bin/prime-agent (deleted)")),
+                Some(Path::new("/usr/bin/prime-agent"))
+            ),
+            HolderFlavor::ThisBuild
+        );
         assert_eq!(
             classify_from(
                 Some(Path::new("/Users/k/.local/share/prime-agent/prime-agent")),

@@ -1,0 +1,1 @@
+- Fixed new sessions failing to start on Linux after the prime-agent binary was replaced while the daemon kept running (for example by a package upgrade).
