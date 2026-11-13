@@ -173,6 +173,37 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
                 run_agents_view_flow(base, None, None, Some(entry)).await
             }
         };
+        #[cfg(unix)]
+        let result = {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).ok();
+            let mut sighup = signal(SignalKind::hangup()).ok();
+
+            tokio::select! {
+                res = run => res,
+                () = async {
+                    if let Some(s) = &mut sigterm {
+                        s.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    pa_tui::exit_restore::restore_terminal();
+                    std::process::exit(143);
+                }
+                () = async {
+                    if let Some(s) = &mut sighup {
+                        s.recv().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    pa_tui::exit_restore::restore_terminal();
+                    std::process::exit(129);
+                }
+            }
+        };
+        #[cfg(not(unix))]
         let result = run.await;
         // The quick-exit join: the runtime that owns the handed-off drain
         // dies with this block, so a run that ends inside the delivery

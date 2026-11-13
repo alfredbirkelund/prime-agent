@@ -1,0 +1,1 @@
+- The TUI and print mode report their status over OSC 7501 to terminals that support it, such as Herdr.

@@ -834,6 +834,7 @@ async fn run_interactive_surface(
     // Whether the Ctrl+C exit hint painted a frame that the expiry must clear.
     let mut hint_painted = false;
     let mut running = true;
+    let mut last_status: Option<crate::osc7501::StatusState> = None;
     let mut wait_idle_deadline: Option<Instant> = None;
     // The headless `SubmitAndSettle` barrier's target and deadline.
     let mut settle_target: Option<(u64, Instant)> = None;
@@ -1057,6 +1058,7 @@ async fn run_interactive_surface(
                                     let _ = renderer.resume();
                                 }
                             }
+                            last_status = None;
                         }
                         // Hand the terminal to the editor, then resume. The input reader would
                         // steal the editor's keys, so it stops (flag + join) and respawns after the
@@ -1116,6 +1118,7 @@ async fn run_interactive_surface(
                                 }
                                 spawn_session_reader(ui_tx, exit_guard);
                                 session.apply_external_editor_outcome(outcome, &mut view);
+                                last_status = None;
                             }
                         }
                         // The `/mcp` view resolved to an auth request: mount the inline auth panel
@@ -1753,6 +1756,30 @@ async fn run_interactive_surface(
         // after the select, right before the paint — because a loop-top refresh goes stale across
         // the select's sleep: the expiry wake would repaint the hint with the pre-sleep value.
         view.chrome.tray_override = session.tray_override(&view);
+
+        let subagents_active = session.has_active_subagents();
+        let current_status = if view.confirm.is_some() {
+            crate::osc7501::StatusState::Blocked(crate::osc7501::BlockedKind::Permission)
+        } else if view.auth_panel.is_some() || view.provider_auth.is_some() {
+            crate::osc7501::StatusState::Blocked(crate::osc7501::BlockedKind::Auth)
+        } else if view.choice_picker.is_some() || view.side_pane.is_some() {
+            crate::osc7501::StatusState::Blocked(crate::osc7501::BlockedKind::Question)
+        } else if session.turn_active
+            || subagents_active
+            || view.working.is_some()
+            || view.compaction.is_some()
+            || view.retry.is_some()
+        {
+            crate::osc7501::StatusState::Working
+        } else {
+            crate::osc7501::StatusState::Idle
+        };
+        if last_status != Some(current_status) {
+            if renderer.is_terminal() {
+                crate::osc7501::emit(current_status);
+            }
+            last_status = Some(current_status);
+        }
 
         // The frame gate: at most one render per MIN_RENDER_INTERVAL_MS — every state change inside
         // the window coalesces into the next frame (a stream burst renders at most one frame per

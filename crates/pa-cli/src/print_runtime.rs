@@ -381,9 +381,21 @@ impl From<HeadlessEngine> for pa_daemon::rpc::session::RpcEngineHandle {
 }
 
 fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
-    with_print_runtime(options, |options, lease| {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        pa_tui::osc7501::emit_stderr(pa_tui::osc7501::StatusState::Working);
+    }
+    let result = with_print_runtime(options, |options, lease| {
         Box::pin(print_mode_main(options, lease))
-    })
+    });
+    if std::io::stderr().is_terminal() {
+        let final_state = match &result {
+            Ok(0) => pa_tui::osc7501::StatusState::Done,
+            _ => pa_tui::osc7501::StatusState::Error,
+        };
+        pa_tui::osc7501::emit_stderr(final_state);
+    }
+    result
 }
 
 /// Own the print lease through runtime shutdown, including errors and unwinding.

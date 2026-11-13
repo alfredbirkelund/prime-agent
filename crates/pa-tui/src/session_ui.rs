@@ -471,6 +471,11 @@ impl SessionUi {
         std::mem::take(&mut self.trim_after_frame)
     }
 
+    /// Whether any subagent tasks are actively running.
+    pub(crate) fn has_active_subagents(&self) -> bool {
+        self.subagent_counts.running > 0
+    }
+
     /// Hand the keyboard focus to the dock on its selected group (operator ruling
     /// 2026-09-26: leaving a panel lands on the panel's own dock item, never the prompt bar).
     fn focus_activity_dock(&mut self, view: &mut AgentView) {

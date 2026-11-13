@@ -770,11 +770,11 @@ fn sanitize_output(text: &str) -> String {
     out.replace('\r', "")
 }
 
-/// Strip ANSI escape sequences (CSI sequences and the simple two-byte
-/// escapes the `strip-ansi` package handles).
+/// Strip ANSI escape sequences (CSI sequences, OSC sequences, and simple
+/// two-byte escapes).
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
+    let mut chars = text.chars().peekable();
     while let Some(character) = chars.next() {
         if character != '\u{1b}' {
             out.push(character);
@@ -785,6 +785,21 @@ fn strip_ansi(text: &str) -> String {
             Some('[') => {
                 for next in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC: Operating System Command, terminated by BEL (\x07) or ST (\x1b\ or \u{9c}).
+            // Also handles DCS ('P'), APC ('_'), and PM ('^').
+            Some(']' | 'P' | '_' | '^') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' || next == '\u{9c}' {
+                        break;
+                    }
+                    if next == '\u{1b}' {
+                        if chars.peek() == Some(&'\\') {
+                            chars.next();
+                        }
                         break;
                     }
                 }
@@ -1662,5 +1677,17 @@ mod tests {
             "a rejected run records nothing"
         );
         assert!(!worker.user_bash.is_running());
+    }
+
+    #[test]
+    fn test_strip_ansi_csi_and_osc() {
+        assert_eq!(strip_ansi("hello world"), "hello world");
+        assert_eq!(strip_ansi("\x1b[31mred text\x1b[0m"), "red text");
+        assert_eq!(strip_ansi("\x1b]0;terminal title\x07hello"), "hello");
+        assert_eq!(
+            strip_ansi("\x1b]7501;state=idle:app=prime-agent\x1b\\status text"),
+            "status text"
+        );
+        assert_eq!(strip_ansi("\x1bP12345\x1b\\dcs payload"), "dcs payload");
     }
 }
